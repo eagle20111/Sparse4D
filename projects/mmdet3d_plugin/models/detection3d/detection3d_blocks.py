@@ -19,7 +19,11 @@ __all__ = [
     "SparseBox3DEncoder",
 ]
 
-
+'''
+实例表示:结构化状态与高维特征融合
+结构化状态信息:3D框参数 (x,y,z,w,l,h,yaw,vx,vy)
+高维特征向量: 在解码器中通过持续采样图像特征进行更新
+'''
 @POSITIONAL_ENCODING.register_module()
 class SparseBox3DEncoder(BaseModule):
     def __init__(
@@ -44,6 +48,7 @@ class SparseBox3DEncoder(BaseModule):
 
         if not isinstance(embed_dims, (list, tuple)):
             embed_dims = [embed_dims] * 5
+        # 位置、尺寸、偏航角、速度的全连接层
         self.pos_fc = embedding_layer(3, embed_dims[0])
         self.size_fc = embedding_layer(3, embed_dims[1])
         self.yaw_fc = embedding_layer(2, embed_dims[2])
@@ -55,19 +60,20 @@ class SparseBox3DEncoder(BaseModule):
             self.output_fc = None
 
     def forward(self, box_3d: torch.Tensor):
+        # 提取位置、尺寸、偏航角特征
         pos_feat = self.pos_fc(box_3d[..., [X, Y, Z]])
         size_feat = self.size_fc(box_3d[..., [W, L, H]])
         yaw_feat = self.yaw_fc(box_3d[..., [SIN_YAW, COS_YAW]])
-        if self.mode == "add":
+        if self.mode == "add": # 加法模式，将位置、尺寸、偏航角特征相加
             output = pos_feat + size_feat + yaw_feat
-        elif self.mode == "cat":
+        elif self.mode == "cat": # 拼接模式，将位置、尺寸、偏航角特征拼接在一起
             output = torch.cat([pos_feat, size_feat, yaw_feat], dim=-1)
 
         if self.vel_dims > 0:
             vel_feat = self.vel_fc(box_3d[..., VX : VX + self.vel_dims])
-            if self.mode == "add":
+            if self.mode == "add": # 加法模式，将速度特征添加到输出中
                 output = output + vel_feat
-            elif self.mode == "cat":
+            elif self.mode == "cat": # 拼接模式，将速度特征拼接在一起
                 output = torch.cat([output, vel_feat], dim=-1)
         if self.output_fc is not None:
             output = self.output_fc(output)
@@ -158,6 +164,33 @@ class SparseBox3DRefinementModule(BaseModule):
 
 @PLUGIN_LAYERS.register_module()
 class SparseBox3DKeyPointsGenerator(BaseModule):
+    '''
+    - 生成3D框的关键点
+    - 输入: 3D框参数 (x,y,z,w,l,h,yaw,vx,vy)
+    - 输出: 3D框的关键点坐标 (num_pts, 3)
+
+    # ① 固定关键点(7个)
+    #    中心 + 6个面中心
+    fixed_keypoints = [
+        center,                           # (0,0,0)
+        center + [0, 0, h/2],            # 上
+        center + [0, 0, -h/2],           # 下
+        center + [w/2, 0, 0],            # 右
+        center + [-w/2, 0, 0],           # 左
+        center + [0, l/2, 0],            # 前
+        center + [0, -l/2, 0],           # 后
+    ]
+    # ② 可学习偏移(6个)
+    offset = self.layers_offset(instance_feature)  # (BS, N, 6*3)
+    learnable_keypoints = center + offset.reshape(BS, N, 6, 3)
+    # ③ 拼接
+    keypoints = torch.cat([fixed_keypoints, learnable_keypoints], dim=2)
+    # (BS, N, 13, 3)
+    # ④ 旋转到世界坐标
+    keypoints = rotate_by_yaw(keypoints, anchor[..., 6:8])
+    return keypoints
+
+    '''
     def __init__(
         self,
         embed_dims=256,
@@ -188,6 +221,9 @@ class SparseBox3DKeyPointsGenerator(BaseModule):
         cur_timestamp=None,
         temp_timestamps=None,
     ):
+        # anchor: (BS, N, 11)
+        # 固定关键点(7个)
+        # 中心 + 6个面中心
         bs, num_anchor = anchor.shape[:2]
         size = anchor[..., None, [W, L, H]].exp()
         key_points = self.fix_scale * size

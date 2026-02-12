@@ -23,7 +23,7 @@ except:
 
 __all__ = ["Sparse4D"]
 
-
+# https://zhuanlan.zhihu.com/p/1998400803229177565
 @DETECTORS.register_module()
 class Sparse4D(BaseDetector):
     def __init__(
@@ -61,20 +61,27 @@ class Sparse4D(BaseDetector):
 
     @auto_fp16(apply_to=("img",), out_fp32=True)
     def extract_feat(self, img, return_depth=False, metas=None):
-        bs = img.shape[0]
-        if img.dim() == 5:  # multi-view
-            num_cams = img.shape[1]
-            img = img.flatten(end_dim=1)
+        
+        bs = img.shape[0] # 获取批次大小
+        if img.dim() == 5:  # multi-view # 多视角图像
+            num_cams = img.shape[1] # 获取多视角图像的数量
+            img = img.flatten(end_dim=1) # 将多视角图像展平为二维张量，形状为 (bs * num_cams, C, H, W)
         else:
             num_cams = 1
         if self.use_grid_mask:
-            img = self.grid_mask(img)
-        if "metas" in signature(self.img_backbone.forward).parameters:
-            feature_maps = self.img_backbone(img, num_cams, metas=metas)
+            img = self.grid_mask(img) # 应用网格掩码，增强模型对不同视角图像的鲁棒性
+        
+        # 使用图像骨干网络提取特征图
+        if "metas" in signature(self.img_backbone.forward).parameters: #metas参数在图像骨干网络的前向传播中
+            feature_maps = self.img_backbone(img, num_cams, metas=metas) # 将metas参数传递给图像骨干网络,进行特征图的提取
         else:
-            feature_maps = self.img_backbone(img)
+            feature_maps = self.img_backbone(img) # 使用骨干网络提取特征图
+        
+        # 如果存在颈部网络，则对特征图进行进一步处理
         if self.img_neck is not None:
             feature_maps = list(self.img_neck(feature_maps))
+        
+        # 重塑特征图以匹配原始视角数量
         for i, feat in enumerate(feature_maps):
             feature_maps[i] = torch.reshape(
                 feat, (bs, num_cams) + feat.shape[1:]
